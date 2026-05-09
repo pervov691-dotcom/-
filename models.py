@@ -186,7 +186,6 @@ def get_chest_cooldown_info(chest_type, player):
 
 def open_chest_with_timer(chest_type, player):
     from database import update_player
-    from datetime import datetime
     
     chest = CHESTS.get(chest_type)
     if not chest:
@@ -391,3 +390,102 @@ def update_epic_boss_attack(boss_name, player):
         setattr(player, count_field, getattr(player, count_field, 0) + 1)
     
     update_player(player)
+
+# ==================== РАНДОМНЫЕ СОБЫТИЯ ====================
+RANDOM_EVENTS = [
+    {
+        "name": "🍀 Находка",
+        "description": "Ты нашёл забытый кошелёк!",
+        "gold_bonus": (50, 150),
+        "crystal_bonus": (0, 1),
+        "chance": 0.1
+    },
+    {
+        "name": "🧙 Странствующий торговец",
+        "description": "Торговец продал тебе редкое зелье дёшево!",
+        "small_potion": 1,
+        "big_potion": 0,
+        "chance": 0.08
+    },
+    {
+        "name": "🛡️ Благословение",
+        "description": "Боги временно усилили твою защиту на этот бой!",
+        "defense_bonus": 10,
+        "chance": 0.05
+    },
+    {
+        "name": "⚔️ Ярость берсерка",
+        "description": "Ты впал в ярость! Урон увеличен на время боя!",
+        "attack_bonus": 15,
+        "chance": 0.05
+    },
+    {
+        "name": "💀 Проклятие",
+        "description": "Ты наступил на проклятую ловушку! HP уменьшено на время боя.",
+        "hp_penalty": -30,
+        "chance": 0.04
+    },
+    {
+        "name": "🐉 След дракона",
+        "description": "Ты нашёл чешую дракона!",
+        "crystals": (1, 3),
+        "chance": 0.03
+    }
+]
+
+def trigger_random_event(player, monster):
+    """Триггер случайного события при входе в бой"""
+    event = None
+    for e in RANDOM_EVENTS:
+        if random.random() < e["chance"]:
+            event = e.copy()
+            break
+    
+    if not event:
+        return None, monster
+    
+    event_text = f"✨ **СЛУЧАЙНОЕ СОБЫТИЕ!** ✨\n{event['description']}\n"
+    bonuses = []
+    
+    if "gold_bonus" in event:
+        gold = random.randint(event["gold_bonus"][0], event["gold_bonus"][1])
+        player.gold += gold
+        bonuses.append(f"💰 +{gold} золота")
+    
+    if "crystal_bonus" in event:
+        crystals = random.randint(event["crystal_bonus"][0], event["crystal_bonus"][1])
+        player.crystals += crystals
+        bonuses.append(f"💎 +{crystals} кристаллов")
+    
+    if "crystals" in event:
+        crystals = random.randint(event["crystals"][0], event["crystals"][1])
+        player.crystals += crystals
+        bonuses.append(f"💎 +{crystals} кристаллов")
+    
+    if "small_potion" in event:
+        player.small_potions += event["small_potion"]
+        bonuses.append(f"🧪 +{event['small_potion']} малое зелье")
+    
+    if "big_potion" in event:
+        player.big_potions += event["big_potion"]
+        bonuses.append(f"💊 +{event['big_potion']} великое зелье")
+    
+    if "attack_bonus" in event:
+        monster["temp_attack_bonus"] = event["attack_bonus"]
+        bonuses.append(f"⚔️ Урон увеличен на {event['attack_bonus']} в этом бою!")
+    
+    if "defense_bonus" in event:
+        monster["temp_defense_bonus"] = event["defense_bonus"]
+        bonuses.append(f"🛡️ Защита увеличена на {event['defense_bonus']} в этом бою!")
+    
+    if "hp_penalty" in event:
+        player.max_hp += event["hp_penalty"]
+        player.hp = min(player.hp, player.max_hp)
+        bonuses.append(f"❤️ Максимальное HP уменьшено на {-event['hp_penalty']} (только на этот бой)")
+    
+    event_text += "\n".join(bonuses) if bonuses else "✨ Приятный сюрприз!"
+    
+    from database import update_player
+    update_player(player)
+    
+    return event_text, monster
