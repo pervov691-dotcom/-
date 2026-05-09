@@ -20,11 +20,13 @@ from models import (
     MONSTERS, get_random_monster, get_gear_hp_bonus, get_upgrade_cost, get_castle_upgrade_cost,
     calculate_power, update_power, get_pet_bonus, get_pet_upgrade_cost, 
     CHESTS, get_chest_cooldown_info, open_chest_with_timer,
-    EPIC_BOSSES, get_epic_boss, get_epic_boss_limit_info, update_epic_boss_attack
+    EPIC_BOSSES, get_epic_boss, get_epic_boss_limit_info, update_epic_boss_attack,
+    RANDOM_EVENTS, trigger_random_event
 )
 
-# Импорт админ-панели (БЕЗ raid_events)
-from admin_panel import handle_admin_command, admin_login
+# Импорт админ-панели и статистики
+from admin_panel import handle_admin_command, admin_login, promocodes, use_promocode
+from statistics import get_player_stats, format_player_stats
 
 # ==================== ИНИЦИАЛИЗАЦИЯ БОТА ====================
 vk_session = vk_api.VkApi(token=VK_TOKEN)
@@ -56,6 +58,8 @@ def get_main_keyboard():
     keyboard.add_line()
     keyboard.add_button("⚔️ Арена", color=VkKeyboardColor.SECONDARY)
     keyboard.add_button("🏆 Достижения", color=VkKeyboardColor.SECONDARY)
+    keyboard.add_line()
+    keyboard.add_button("📊 Моя статистика", color=VkKeyboardColor.PRIMARY)
     return keyboard
 
 def get_back_keyboard():
@@ -114,14 +118,23 @@ def send_msg(user_id, text, keyboard=None):
             keyboard=keyboard.get_keyboard() if keyboard else None
         )
     except Exception as e:
-        print(f"Ошибка отправки сообщения {user_id}: {e}")
+        print(f"Ошибка отправки: {e}")
 
 def send_all_message(text):
     session = Session()
-    players = session.query(Player).filter_by(is_banned=False).all()
-    for player in players:
-        send_msg(player.vk_id, text)
-    session.close()
+    try:
+        players = session.query(Player).filter_by(is_banned=False).all()
+        for player in players:
+            try:
+                vk.messages.send(
+                    user_id=player.vk_id,
+                    message=text,
+                    random_id=random.randint(1, 10**9)
+                )
+            except:
+                pass
+    finally:
+        session.close()
 
 def update_player_nick_from_vk(user_id, player):
     try:
@@ -336,7 +349,7 @@ def open_chest_command(user_id, chest_name):
     """
     send_msg(user_id, text, get_back_keyboard())
 
-# ==================== РАТУША ====================
+# ==================== РАТУША И ЭКИПИРОВКА ====================
 def show_castle(user_id, player):
     next_cost = get_castle_upgrade_cost(player.castle_level)
     can_upgrade = next_cost and player.crystals >= next_cost and player.castle_level < 15
@@ -386,7 +399,6 @@ def upgrade_castle(user_id):
 
     show_castle(user_id, player)
 
-# ==================== ЭКИПИРОВКА ====================
 def show_gear(user_id, player):
     hp_bonus = get_gear_hp_bonus(player)
 
@@ -470,6 +482,10 @@ def start_battle(user_id, location):
         return
 
     monster = get_random_monster(location)
+    
+    # Рандомное событие
+    event_text, monster = trigger_random_event(player, monster)
+    event_message = "\n\n" + event_text if event_text else ""
 
     active_battles[user_id] = {
         "monster": monster,
@@ -500,7 +516,7 @@ def start_battle(user_id, location):
 ⚔️ Сила атаки: {player.attack_power}
 🛡️ Защита: {player.defense}
 
-💡 Атакуй, чтобы победить!
+💡 Атакуй, чтобы победить!{event_message}
     """
     send_msg(user_id, text, get_battle_keyboard())
 
@@ -525,6 +541,13 @@ def continue_battle(user_id):
         crit_text = "💥 Критический удар! "
     else:
         crit_text = ""
+
+    # Учитываем временные бонусы от событий
+    if "temp_attack_bonus" in monster:
+        player_damage += monster["temp_attack_bonus"]
+    if "temp_defense_bonus" in monster:
+        # Временно увеличиваем защиту на этот раунд
+        player.defense += monster["temp_defense_bonus"]
 
     battle["monster_current_hp"] -= player_damage
     monster_damage = max(1, battle["monster_attack"] - player.defense + random.randint(-3, 5))
@@ -909,7 +932,8 @@ def show_inventory(user_id, player):
    ➤ Восстанавливает 120 Hp в бою
    ➤ В наличии: {player.big_potions}
 
-━━━━━━━━━━━━━━━━━━━━━━💡 Используй зелье командой:
+━━━━━━━━━━━━━━━━━━━━━━
+💡 Используй зелье командой:
    • "зелье малое"
    • "зелье великое"
     """
@@ -1300,6 +1324,12 @@ def handle_message(user_id, text, first_name):
         send_msg(user_id, "🚫 Ваш аккаунт заблокирован администратором!")
         return
 
+    # Промокоды
+    if text.lower().startswith("промокод"):
+        code = text[8:].strip()
+        use_promocode(vk, user_id, code)
+        return
+
     if text == "/admin" and user_id in ADMIN_IDS:
         admin_login(vk, user_id)
         return
@@ -1451,6 +1481,12 @@ def handle_message(user_id, text, first_name):
     # Друзья
     if text == "👫 Друзья" or text == "Друзья":
         show_friends(user_id, player)
+        return
+
+    # Моя статистика
+    if text == "📊 Моя статистика" or text == "Моя статистика":
+        stats = get_player_stats(user_id)
+        send_msg(user_id, format_player_stats(stats), get_back_keyboard())
         return
 
     # Зелья
