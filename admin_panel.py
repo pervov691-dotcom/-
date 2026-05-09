@@ -12,7 +12,7 @@ from models import calculate_power
 
 # Глобальные состояния
 admin_sessions = {}
-promocodes = {}  # {код: {"gold": 500, "crystals": 10, "used_by": [], "expires": datetime}}
+promocodes = {}
 
 # ==================== КЛАВИАТУРЫ ====================
 def get_admin_keyboard():
@@ -28,6 +28,16 @@ def get_admin_keyboard():
     keyboard.add_button("📢 Вывести топ-15", color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button("🚪 Выйти", color=VkKeyboardColor.NEGATIVE)
+    return keyboard
+
+def get_give_keyboard():
+    keyboard = VkKeyboard(one_time=False)
+    keyboard.add_button("💰 Выдать золото", color=VkKeyboardColor.POSITIVE)
+    keyboard.add_button("💎 Выдать кристаллы", color=VkKeyboardColor.POSITIVE)
+    keyboard.add_line()
+    keyboard.add_button("🎁 Выдать всё", color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button("⬅️ Назад", color=VkKeyboardColor.SECONDARY)
     return keyboard
 
 def get_back_keyboard():
@@ -47,75 +57,16 @@ def send_msg(vk, user_id, text, keyboard=None):
     except Exception as e:
         print(f"Ошибка отправки: {e}")
 
-def send_all_message(vk, text, delay=0.1):
-    """Отправка сообщения всем игрокам с задержкой, чтобы не флудить API"""
+def get_player_by_id(vk_id):
     session = Session()
     try:
-        players = session.query(Player).filter_by(is_banned=False).all()
-        total = len(players)
-        print(f"📢 Отправка массового сообщения {total} игрокам...")
-        
-        for i, player in enumerate(players):
-            try:
-                vk.messages.send(
-                    user_id=player.vk_id,
-                    message=text,
-                    random_id=random.randint(1, 10**9)
-                )
-                if delay > 0 and i % 10 == 0:
-                    time.sleep(delay)
-            except Exception as e:
-                print(f"❌ Не удалось отправить игроку {player.vk_id}: {e}")
-        
-        print(f"✅ Рассылка завершена!")
-    finally:
-        session.close()
-
-def use_promocode(vk, user_id, code):
-    """Активация промокода игроком"""
-    code = code.upper().strip()
-    
-    if code not in promocodes:
-        send_msg(vk, user_id, "❌ Неверный или устаревший промокод!")
-        return
-    
-    promo = promocodes[code]
-    
-    if promo["expires"] < datetime.utcnow():
-        send_msg(vk, user_id, "❌ Срок действия промокода истёк!")
-        return
-    
-    if user_id in promo["used_by"]:
-        send_msg(vk, user_id, "❌ Вы уже активировали этот промокод!")
-        return
-    
-    session = Session()
-    try:
-        player = session.query(Player).filter_by(vk_id=user_id).first()
-        if not player:
-            send_msg(vk, user_id, "❌ Персонаж не найден!")
-            return
-        
-        if promo["gold"] > 0:
-            player.gold += promo["gold"]
-        if promo["crystals"] > 0:
-            player.crystals += promo["crystals"]
-        player.total_power = calculate_power(player)
-        session.commit()
-        
-        promo["used_by"].append(user_id)
-        
-        send_msg(vk, user_id, f"""
-🎉 **ПРОМОКОД АКТИВИРОВАН!**
-
-💰 +{promo['gold']} золота
-💎 +{promo['crystals']} кристаллов
-
-Спасибо, что играете с нами!
-""")
-    except Exception as e:
-        session.rollback()
-        send_msg(vk, user_id, f"❌ Ошибка: {e}")
+        player = session.query(Player).filter_by(vk_id=vk_id).first()
+        if player:
+            # Принудительно загружаем данные
+            _ = player.nick
+            _ = player.gold
+            _ = player.crystals
+        return player
     finally:
         session.close()
 
@@ -165,61 +116,117 @@ def show_statistics(vk, user_id):
     """
     send_msg(vk, user_id, text, get_admin_keyboard())
 
-def give_resources(vk, user_id, data):
-    """Выдать ресурсы игроку"""
-    print(f"📌 Выдача ресурсов. Ввод: {data}")
-    
-    parts = data.split()
-    if not parts:
-        send_msg(vk, user_id, "❌ Неверный формат!\nПример: `123456 золото:500 кристаллы:10`", get_admin_keyboard())
+def give_resources_step1(vk, user_id):
+    """Первый шаг - запрос ID игрока"""
+    admin_sessions[user_id]["state"] = "give_get_id"
+    send_msg(vk, user_id, """
+🎁 **ВЫДАТЬ РЕСУРСЫ**
+
+📌 **Шаг 1:** Введите ID игрока
+
+💡 **Где взять ID?**
+• Откройте профиль игрока ВКонтакте
+• В ссылке будет vk.com/id123456
+• Число после id — это и есть ID
+
+**Пример:** `123456`
+""", get_back_keyboard())
+
+def give_resources_step2(vk, user_id, player_id):
+    """Второй шаг - выбор ресурсов после получения ID"""
+    player = get_player_by_id(player_id)
+    if not player:
+        send_msg(vk, user_id, f"❌ Игрок с ID {player_id} не найден в базе данных!\nПроверьте ID и попробуйте снова.", get_admin_keyboard())
+        admin_sessions[user_id]["state"] = None
         return
     
-    player_id = None
-    for part in parts:
-        if part.lower().startswith("id"):
-            try:
-                player_id = int(part[2:])
-                break
-            except:
-                pass
-        elif part.isdigit():
-            player_id = int(part)
-            break
+    admin_sessions[user_id]["give_player_id"] = player_id
+    admin_sessions[user_id]["give_player_nick"] = player.nick
+    admin_sessions[user_id]["state"] = "give_choose"
+    
+    send_msg(vk, user_id, f"""
+✅ **ИГРОК НАЙДЕН!**
+
+👤 {player.nick} (ID: {player_id})
+💰 Текущее золото: {player.gold}
+💎 Текущие кристаллы: {player.crystals}
+
+━━━━━━━━━━━━━━━━━━━━━━
+📌 **Шаг 2:** Что хотите выдать?
+""", get_give_keyboard())
+
+def give_resources_execute(vk, user_id, resource_type):
+    """Третий шаг - ввод суммы и причины"""
+    player_id = admin_sessions[user_id].get("give_player_id")
+    if not player_id:
+        send_msg(vk, user_id, "❌ Ошибка: игрок не выбран. Начните заново.", get_admin_keyboard())
+        admin_sessions[user_id]["state"] = None
+        return
+    
+    admin_sessions[user_id]["give_resource_type"] = resource_type
+    admin_sessions[user_id]["state"] = "give_amount"
+    
+    if resource_type == "gold":
+        send_msg(vk, user_id, "💰 Введите количество золота и причину:\n\n`500 причина:Бонус за активность`", get_back_keyboard())
+    elif resource_type == "crystals":
+        send_msg(vk, user_id, "💎 Введите количество кристаллов и причину:\n\n`10 причина:Бонус за активность`", get_back_keyboard())
+    elif resource_type == "both":
+        send_msg(vk, user_id, "🎁 Введите золото, кристаллы и причину:\n\n`золото:500 кристаллы:10 причина:Праздник`", get_back_keyboard())
+
+def give_resources_finish(vk, user_id, data):
+    """Финальный шаг - выполнение выдачи"""
+    player_id = admin_sessions[user_id].get("give_player_id")
+    resource_type = admin_sessions[user_id].get("give_resource_type")
     
     if not player_id:
-        send_msg(vk, user_id, f"❌ Не указан ID игрока!\nПример: `123456 золото:500`", get_admin_keyboard())
+        send_msg(vk, user_id, "❌ Ошибка: игрок не выбран. Начните заново.", get_admin_keyboard())
+        admin_sessions[user_id]["state"] = None
         return
     
+    # Парсинг данных
     gold = 0
     crystals = 0
     reason = "Выдача от администратора"
     
-    for part in parts:
-        part_lower = part.lower()
-        if part_lower.startswith("золото:") or part_lower.startswith("gold:"):
-            try:
-                gold = int(part.split(":")[1])
-            except:
-                pass
-        elif part_lower.startswith("кристаллы:") or part_lower.startswith("crystals:"):
-            try:
-                crystals = int(part.split(":")[1])
-            except:
-                pass
-        elif part_lower.startswith("причина:"):
-            reason = part.split(":", 1)[1]
+    if resource_type == "gold":
+        match = re.search(r'(\d+)', data)
+        if match:
+            gold = int(match.group(1))
+        reason_match = re.search(r'причина:(.+)', data, re.IGNORECASE)
+        if reason_match:
+            reason = reason_match.group(1)
+    elif resource_type == "crystals":
+        match = re.search(r'(\d+)', data)
+        if match:
+            crystals = int(match.group(1))
+        reason_match = re.search(r'причина:(.+)', data, re.IGNORECASE)
+        if reason_match:
+            reason = reason_match.group(1)
+    elif resource_type == "both":
+        gold_match = re.search(r'золото:(\d+)', data, re.IGNORECASE)
+        crystals_match = re.search(r'кристаллы:(\d+)', data, re.IGNORECASE)
+        reason_match = re.search(r'причина:(.+)', data, re.IGNORECASE)
+        if gold_match:
+            gold = int(gold_match.group(1))
+        if crystals_match:
+            crystals = int(crystals_match.group(1))
+        if reason_match:
+            reason = reason_match.group(1)
     
     if gold == 0 and crystals == 0:
-        send_msg(vk, user_id, "❌ Укажите, что выдавать! Пример: `123456 золото:500`", get_admin_keyboard())
+        send_msg(vk, user_id, "❌ Укажите корректную сумму!\nПример: `500` или `золото:500 кристаллы:10`", get_back_keyboard())
         return
     
+    # Выдача ресурсов
     session = Session()
     try:
         player = session.query(Player).filter_by(vk_id=player_id).first()
-        
         if not player:
             send_msg(vk, user_id, f"❌ Игрок с ID {player_id} не найден!", get_admin_keyboard())
             return
+        
+        old_gold = player.gold
+        old_crystals = player.crystals
         
         if gold > 0:
             player.gold += gold
@@ -245,24 +252,22 @@ def give_resources(vk, user_id, data):
         
     except Exception as e:
         session.rollback()
-        send_msg(vk, user_id, f"❌ Ошибка: {e}", get_admin_keyboard())
+        send_msg(vk, user_id, f"❌ Ошибка при выдаче: {e}", get_admin_keyboard())
         return
     finally:
         session.close()
     
+    # Уведомление админу
     send_msg(vk, user_id, f"""
-✅ **ВЫДАНО!**
+✅ **ВЫДАЧА ВЫПОЛНЕНА!**
 
 👤 Игрок: {player_nick} (ID: {player_vk_id})
-💰 +{gold} золота
-💎 +{crystals} кристаллов
+💰 +{gold} золота ({old_gold} → {player_gold})
+💎 +{crystals} кристаллов ({old_crystals} → {player_crystals})
 📝 Причина: {reason}
-
-Теперь у игрока:
-💰 Золото: {player_gold}
-💎 Кристаллы: {player_crystals}
 """, get_admin_keyboard())
     
+    # Уведомление игроку
     try:
         vk.messages.send(
             user_id=player_vk_id,
@@ -278,6 +283,12 @@ def give_resources(vk, user_id, data):
         )
     except:
         pass
+    
+    # Сброс состояния
+    admin_sessions[user_id]["state"] = None
+    admin_sessions[user_id]["give_player_id"] = None
+    admin_sessions[user_id]["give_player_nick"] = None
+    admin_sessions[user_id]["give_resource_type"] = None
 
 def mass_gift(vk, user_id, data):
     """Массовая выдача ресурсов всем игрокам"""
@@ -326,7 +337,13 @@ def mass_gift(vk, user_id, data):
     finally:
         session.close()
     
-    send_all_message(vk, f"""
+    # Фоновый поток для рассылки (чтобы не блокировать)
+    def send_rewards():
+        for player in players:
+            try:
+                vk.messages.send(
+                    user_id=player.vk_id,
+                    message=f"""
 🎉 **МАССОВЫЙ ПОДАРОК!**
 
 💰 +{gold} золота
@@ -335,7 +352,15 @@ def mass_gift(vk, user_id, data):
 📝 Причина: {reason}
 
 Спасибо, что играете с нами! 🏰
-""")
+""",
+                    random_id=random.randint(1, 10**9)
+                )
+                time.sleep(0.05)
+            except:
+                pass
+    
+    import threading
+    threading.Thread(target=send_rewards, daemon=True).start()
     
     send_msg(vk, user_id, f"""
 ✅ **МАССОВЫЙ ПОДАРОК ВЫПОЛНЕН!**
@@ -387,6 +412,54 @@ def create_promocode(vk, admin_id, data):
 Игроки могут активировать командой: `промокод {code}`
 """, get_admin_keyboard())
 
+def use_promocode(vk, user_id, code):
+    """Активация промокода игроком"""
+    code = code.upper().strip()
+    
+    if code not in promocodes:
+        send_msg(vk, user_id, "❌ Неверный или устаревший промокод!")
+        return
+    
+    promo = promocodes[code]
+    
+    if promo["expires"] < datetime.utcnow():
+        send_msg(vk, user_id, "❌ Срок действия промокода истёк!")
+        return
+    
+    if user_id in promo["used_by"]:
+        send_msg(vk, user_id, "❌ Вы уже активировали этот промокод!")
+        return
+    
+    session = Session()
+    try:
+        player = session.query(Player).filter_by(vk_id=user_id).first()
+        if not player:
+            send_msg(vk, user_id, "❌ Персонаж не найден!")
+            return
+        
+        if promo["gold"] > 0:
+            player.gold += promo["gold"]
+        if promo["crystals"] > 0:
+            player.crystals += promo["crystals"]
+        player.total_power = calculate_power(player)
+        session.commit()
+        
+        promo["used_by"].append(user_id)
+        
+        send_msg(vk, user_id, f"""
+🎉 **ПРОМОКОД АКТИВИРОВАН!**
+
+💰 +{promo['gold']} золота
+💎 +{promo['crystals']} кристаллов
+
+Спасибо, что играете с нами!
+""")
+    except Exception as e:
+        session.rollback()
+        send_msg(vk, user_id, f"❌ Ошибка: {e}")
+    finally:
+        session.close()
+
 def post_top15(vk, user_id):
     """Вывести топ-15 в группу ВК"""
     session = Session()
@@ -424,33 +497,58 @@ def handle_admin_command(vk, user_id, text):
     if user_id not in admin_sessions:
         return False
     
+    # Выход
     if text == "🚪 Выйти" or text == "Выйти":
         del admin_sessions[user_id]
         send_msg(vk, user_id, "👋 Вы вышли из админ-панели.")
         return True
     
-    elif text == "📊 Статистика" or text == "Статистика":
+    # Статистика
+    if text == "📊 Статистика" or text == "Статистика":
         show_statistics(vk, user_id)
         return True
     
-    elif text == "🎁 Выдать ресурсы" or text == "Выдать ресурсы":
-        admin_sessions[user_id]["state"] = "give"
-        send_msg(vk, user_id, """
-🎁 **ВЫДАТЬ РЕСУРСЫ**
-
-Введите ID игрока и что выдать:
-
-📌 **Формат:**
-`ID золото:XXX кристаллы:YYY причина:Текст`
-
-📌 **Примеры:**
-• `123456 золото:500`
-• `123456 кристаллы:10`
-• `123456 золото:500 кристаллы:10 причина:Бонус`
-""", get_back_keyboard())
+    # Выдать ресурсы - начало
+    if text == "🎁 Выдать ресурсы" or text == "Выдать ресурсы":
+        give_resources_step1(vk, user_id)
         return True
     
-    elif text == "🎉 Массовый подарок" or text == "Массовый подарок":
+    # Возврат в главное меню из выдачи
+    if text == "⬅️ Назад" and admin_sessions.get(user_id, {}).get("state") in ["give_get_id", "give_choose", "give_amount"]:
+        admin_sessions[user_id]["state"] = None
+        admin_sessions[user_id]["give_player_id"] = None
+        admin_sessions[user_id]["give_player_nick"] = None
+        admin_sessions[user_id]["give_resource_type"] = None
+        send_msg(vk, user_id, "🛠️ Админ-панель", get_admin_keyboard())
+        return True
+    
+    # Шаг 1: ввод ID игрока
+    if admin_sessions.get(user_id, {}).get("state") == "give_get_id":
+        if text.isdigit():
+            give_resources_step2(vk, user_id, int(text))
+        else:
+            send_msg(vk, user_id, "❌ ID игрока должен состоять только из цифр!\nПример: `123456`", get_back_keyboard())
+        return True
+    
+    # Шаг 2: выбор типа ресурса
+    if admin_sessions.get(user_id, {}).get("state") == "give_choose":
+        if text == "💰 Выдать золото":
+            give_resources_execute(vk, user_id, "gold")
+        elif text == "💎 Выдать кристаллы":
+            give_resources_execute(vk, user_id, "crystals")
+        elif text == "🎁 Выдать всё":
+            give_resources_execute(vk, user_id, "both")
+        else:
+            send_msg(vk, user_id, "❌ Выберите действие из меню!", get_give_keyboard())
+        return True
+    
+    # Шаг 3: ввод суммы
+    if admin_sessions.get(user_id, {}).get("state") == "give_amount":
+        give_resources_finish(vk, user_id, text)
+        return True
+    
+    # Массовый подарок
+    if text == "🎉 Массовый подарок" or text == "Массовый подарок":
         admin_sessions[user_id]["state"] = "mass"
         send_msg(vk, user_id, """
 🎉 **МАССОВЫЙ ПОДАРОК**
@@ -467,7 +565,14 @@ def handle_admin_command(vk, user_id, text):
 """, get_back_keyboard())
         return True
     
-    elif text == "🎫 Создать промокод" or text == "Создать промокод":
+    if admin_sessions.get(user_id, {}).get("state") == "mass":
+        mass_gift(vk, user_id, text)
+        admin_sessions[user_id]["state"] = None
+        send_msg(vk, user_id, "🛠️ Админ-панель", get_admin_keyboard())
+        return True
+    
+    # Создать промокод
+    if text == "🎫 Создать промокод" or text == "Создать промокод":
         admin_sessions[user_id]["state"] = "promocode"
         send_msg(vk, user_id, """
 🎫 **СОЗДАНИЕ ПРОМОКОДА**
@@ -483,30 +588,15 @@ def handle_admin_command(vk, user_id, text):
 """, get_back_keyboard())
         return True
     
-    elif text == "📢 Вывести топ-15" or text == "Вывести топ-15":
-        post_top15(vk, user_id)
-        return True
-    
-    elif admin_sessions.get(user_id, {}).get("state") == "give":
-        give_resources(vk, user_id, text)
-        admin_sessions[user_id]["state"] = None
-        send_msg(vk, user_id, "🛠️ Админ-панель", get_admin_keyboard())
-        return True
-    
-    elif admin_sessions.get(user_id, {}).get("state") == "mass":
-        mass_gift(vk, user_id, text)
-        admin_sessions[user_id]["state"] = None
-        send_msg(vk, user_id, "🛠️ Админ-панель", get_admin_keyboard())
-        return True
-    
-    elif admin_sessions.get(user_id, {}).get("state") == "promocode":
+    if admin_sessions.get(user_id, {}).get("state") == "promocode":
         create_promocode(vk, user_id, text)
         admin_sessions[user_id]["state"] = None
         send_msg(vk, user_id, "🛠️ Админ-панель", get_admin_keyboard())
         return True
     
-    elif text == "⬅️ Назад":
-        send_msg(vk, user_id, "🛠️ Админ-панель", get_admin_keyboard())
+    # Вывести топ-15
+    if text == "📢 Вывести топ-15" or text == "Вывести топ-15":
+        post_top15(vk, user_id)
         return True
     
     return False
